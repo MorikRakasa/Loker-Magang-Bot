@@ -66,7 +66,6 @@ def main():
     all_accounts = list(set(ACCOUNTS_LOKER + ACCOUNTS_MAGANG))
     print(f"🔍 Menjalankan Apify Scraper untuk {len(all_accounts)} akun...")
 
-    # Menghitung maxItems dinamis berdasarkan jumlah akun dikali jumlah postingan yang diinginkan
     calculated_max_items = len(all_accounts) * MAX_POSTS_PER_ACCOUNT
 
     run_input = {
@@ -83,7 +82,6 @@ def main():
         print(f"⚠️ Gagal menjalankan Apify actor: {e}")
         return
 
-    # Kelompokkan item berdasarkan akun pengirimnya untuk membatasi jumlah per akun secara presisi
     account_posts = {acc: [] for acc in all_accounts}
     
     for item in items:
@@ -91,9 +89,9 @@ def main():
         if author_username in account_posts:
             account_posts[author_username].append(item)
 
-    # Proses postingan sesuai batas MAX_POSTS_PER_ACCOUNT per masing-masing akun
     for account, posts in account_posts.items():
-        print(f"✨ Memproses {len(posts[:MAX_POSTS_PER_ACCOUNT热爱])} postingan terbaru dari @{account}")
+        # PERBAIKAN: Karakter asing/typo sudah dihapus dari variabel MAX_POSTS_PER_ACCOUNT
+        print(f"✨ Memproses {len(posts[:MAX_POSTS_PER_ACCOUNT])} postingan terbaru dari @{account}")
         
         for item in posts[:MAX_POSTS_PER_ACCOUNT]:
             tweet_id = str(item.get("id", ""))
