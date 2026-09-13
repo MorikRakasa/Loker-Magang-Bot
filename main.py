@@ -13,6 +13,9 @@ DISCORD_WEBHOOK_MAGANG = os.getenv("DISCORD_WEBHOOK_MAGANG", "").strip()
 ROLE_ID_LOKER = os.getenv("ROLE_ID_LOKER", "").strip()
 ROLE_ID_MAGANG = os.getenv("ROLE_ID_MAGANG", "").strip()
 
+# Atur jumlah postingan terakhir/terbaru yang ingin diambil per akun di sini:
+MAX_POSTS_PER_ACCOUNT = 5
+
 ACCOUNTS_LOKER = ["lokerdotid", "lokerjogjax", "jogjalowker", "disiniloker", "magnecareer", "twitlowongan", "sobatmagang_id"]
 ACCOUNTS_MAGANG = ["sobatmagang_id", "disiniloker", "magnecareer"]
 
@@ -63,10 +66,12 @@ def main():
     all_accounts = list(set(ACCOUNTS_LOKER + ACCOUNTS_MAGANG))
     print(f"🔍 Menjalankan Apify Scraper untuk {len(all_accounts)} akun...")
 
-    # Konfigurasi input untuk Actor Apify (Menggunakan apidojo/tweet-scraper)
+    # Menghitung maxItems dinamis berdasarkan jumlah akun dikali jumlah postingan yang diinginkan
+    calculated_max_items = len(all_accounts) * MAX_POSTS_PER_ACCOUNT
+
     run_input = {
         "twitterHandles": all_accounts,
-        "maxItems": 40,  # Dibatasi 40 item total agar hemat kuota/kredit $5
+        "maxItems": calculated_max_items,
         "sort": "Latest"
     }
 
@@ -78,31 +83,43 @@ def main():
         print(f"⚠️ Gagal menjalankan Apify actor: {e}")
         return
 
+    # Kelompokkan item berdasarkan akun pengirimnya untuk membatasi jumlah per akun secara presisi
+    account_posts = {acc: [] for acc in all_accounts}
+    
     for item in items:
-        tweet_id = str(item.get("id", ""))
-        if not tweet_id or tweet_id in posted_tweets:
-            continue
-
-        text = (item.get("text") or item.get("full_text", "")).lower()
-        original_text = item.get("text") or item.get("full_text", "")
-        
         author_username = item.get("author", {}).get("userName", "").lower()
-        tweet_url = item.get("url", f"https://twitter.com/{author_username}/status/{tweet_id}")
+        if author_username in account_posts:
+            account_posts[author_username].append(item)
 
-        is_loker = author_username in ACCOUNTS_LOKER or any(kw in text for kw in LOKER_KEYWORDS)
-        is_magang = author_username in ACCOUNTS_MAGANG or any(kw in text for kw in MAGANG_KEYWORDS)
+    # Proses postingan sesuai batas MAX_POSTS_PER_ACCOUNT per masing-masing akun
+    for account, posts in account_posts.items():
+        print(f"✨ Memproses {len(posts[:MAX_POSTS_PER_ACCOUNT热爱])} postingan terbaru dari @{account}")
+        
+        for item in posts[:MAX_POSTS_PER_ACCOUNT]:
+            tweet_id = str(item.get("id", ""))
+            if not tweet_id or tweet_id in posted_tweets:
+                continue
 
-        sent = False
-        if is_loker:
-            send_to_discord(DISCORD_WEBHOOK_LOKER, original_text, tweet_url, "loker", ROLE_ID_LOKER)
-            sent = True
+            text = (item.get("text") or item.get("full_text", "")).lower()
+            original_text = item.get("text") or item.get("full_text", "")
+            
+            author_username = account
+            tweet_url = item.get("url", f"https://twitter.com/{author_username}/status/{tweet_id}")
 
-        if is_magang:
-            send_to_discord(DISCORD_WEBHOOK_MAGANG, original_text, tweet_url, "magang", ROLE_ID_MAGANG)
-            sent = True
+            is_loker = author_username in ACCOUNTS_LOKER or any(kw in text for kw in LOKER_KEYWORDS)
+            is_magang = author_username in ACCOUNTS_MAGANG or any(kw in text for kw in MAGANG_KEYWORDS)
 
-        if sent:
-            save_posted_tweet(tweet_id, posted_tweets)
+            sent = False
+            if is_loker:
+                send_to_discord(DISCORD_WEBHOOK_LOKER, original_text, tweet_url, "loker", ROLE_ID_LOKER)
+                sent = True
+
+            if is_magang:
+                send_to_discord(DISCORD_WEBHOOK_MAGANG, original_text, tweet_url, "magang", ROLE_ID_MAGANG)
+                sent = True
+
+            if sent:
+                save_posted_tweet(tweet_id, posted_tweets)
 
     print("🎉 Selesai memproses dataset Apify.")
 
