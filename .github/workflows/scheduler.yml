@@ -1,0 +1,56 @@
+name: Bot Loker & Magang Scheduler
+
+on:
+  schedule:
+    # Berjalan setiap 30 menit. Catatan: GitHub Actions cron bisa
+    # mengalami delay beberapa menit saat sistem sedang sibuk.
+    - cron: '*/30 * * * *'
+  workflow_dispatch: {}  # memungkinkan trigger manual dari tab Actions
+
+permissions:
+  contents: write  # wajib agar job bisa auto-commit posted_tweets.json
+
+concurrency:
+  group: loker-magang-bot
+  cancel-in-progress: false  # jangan cancel run yang sedang jalan, antre saja
+
+jobs:
+  run-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Jalankan bot
+        env:
+          DISCORD_WEBHOOK_LOKER: ${{ secrets.DISCORD_WEBHOOK_LOKER }}
+          DISCORD_WEBHOOK_MAGANG: ${{ secrets.DISCORD_WEBHOOK_MAGANG }}
+          ROLE_ID_LOKER: ${{ secrets.ROLE_ID_LOKER }}
+          ROLE_ID_MAGANG: ${{ secrets.ROLE_ID_MAGANG }}
+        run: python main.py
+
+      - name: Commit & push posted_tweets.json (jika ada perubahan)
+        run: |
+          git config --local user.email "actions@github.com"
+          git config --local user.name "GitHub Actions Bot"
+          git add posted_tweets.json
+          if git diff --staged --quiet; then
+            echo "Tidak ada perubahan pada posted_tweets.json, lewati commit."
+          else
+            git commit -m "chore: update posted_tweets.json [skip ci]"
+            git pull --rebase origin ${{ github.ref_name }}
+            git push
+          fi
