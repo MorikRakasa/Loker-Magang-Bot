@@ -13,7 +13,7 @@ DISCORD_WEBHOOK_MAGANG = os.getenv("DISCORD_WEBHOOK_MAGANG", "").strip()
 ROLE_ID_LOKER = os.getenv("ROLE_ID_LOKER", "").strip()
 ROLE_ID_MAGANG = os.getenv("ROLE_ID_MAGANG", "").strip()
 
-# Atur jumlah postingan terakhir/terbaru yang ingin diambil per akun di sini:
+# Atur jumlah postingan terakhir/terbaru yang ingin diambil per akun:
 MAX_POSTS_PER_ACCOUNT = 5
 
 ACCOUNTS_LOKER = ["lokerdotid", "lokerjogjax", "jogjalowker", "disiniloker", "magnecareer", "twitlowongan", "sobatmagang_id"]
@@ -36,8 +36,9 @@ def load_posted_tweets():
 def save_posted_tweet(tweet_id, posted_list):
     if tweet_id not in posted_list:
         posted_list.append(tweet_id)
-        if len(posted_list) > 500:
-            posted_list = posted_list[-500:]
+        # Batasi log agar tidak membengkak (simpan 1000 ID terakhir)
+        if len(posted_list) > 1000:
+            posted_list = posted_list[-1000:]
         with open(LOG_FILE, "w") as f:
             json.dump(posted_list, f)
 
@@ -66,7 +67,8 @@ def main():
     all_accounts = list(set(ACCOUNTS_LOKER + ACCOUNTS_MAGANG))
     print(f"🔍 Menjalankan Apify Scraper untuk {len(all_accounts)} akun...")
 
-    calculated_max_items = len(all_accounts) * MAX_POSTS_PER_ACCOUNT
+    # Memperhitungkan batas maxItems agar setiap akun mendapat jatah data yang cukup
+    calculated_max_items = len(all_accounts) * (MAX_POSTS_PER_ACCOUNT + 5)
 
     run_input = {
         "twitterHandles": all_accounts,
@@ -82,30 +84,39 @@ def main():
         print(f"⚠️ Gagal menjalankan Apify actor: {e}")
         return
 
-    account_posts = {acc: [] for acc in all_accounts}
+    # Inisialisasi pengelompokan akun dengan lowercase agar tidak miss match
+    account_posts = {acc.lower(): [] for acc in all_accounts}
     
     for item in items:
-        author_username = item.get("author", {}).get("userName", "").lower()
+        # Menangani berbagai struktur penarikan username dari Apify
+        author_obj = item.get("author", {})
+        author_username = (
+            author_obj.get("userName") or 
+            author_obj.get("username") or 
+            item.get("twitterHandle") or 
+            ""
+        ).lower().replace("@", "")
+
         if author_username in account_posts:
             account_posts[author_username].append(item)
 
+    # Proses postingan per masing-masing akun dengan batas MAX_POSTS_PER_ACCOUNT
     for account, posts in account_posts.items():
-        # PERBAIKAN: Karakter asing/typo sudah dihapus dari variabel MAX_POSTS_PER_ACCOUNT
-        print(f"✨ Memproses {len(posts[:MAX_POSTS_PER_ACCOUNT])} postingan terbaru dari @{account}")
+        limited_posts = posts[:MAX_POSTS_PER_ACCOUNT]
+        print(f"✨ Memproses {len(limited_posts)} postingan terbaru dari @{account}")
         
-        for item in posts[:MAX_POSTS_PER_ACCOUNT]:
-            tweet_id = str(item.get("id", ""))
+        for item in limited_posts:
+            tweet_id = str(item.get("id") or item.get("tweetId") or "")
             if not tweet_id or tweet_id in posted_tweets:
                 continue
 
-            text = (item.get("text") or item.get("full_text", "")).lower()
-            original_text = item.get("text") or item.get("full_text", "")
+            text = (item.get("text") or item.get("full_text") or "").lower()
+            original_text = item.get("text") or item.get("full_text") or ""
             
-            author_username = account
-            tweet_url = item.get("url", f"https://twitter.com/{author_username}/status/{tweet_id}")
+            tweet_url = item.get("url") or f"https://twitter.com/{account}/status/{tweet_id}"
 
-            is_loker = author_username in ACCOUNTS_LOKER or any(kw in text for kw in LOKER_KEYWORDS)
-            is_magang = author_username in ACCOUNTS_MAGANG or any(kw in text for kw in MAGANG_KEYWORDS)
+            is_loker = account in [acc.lower() for acc in ACCOUNTS_LOKER] or any(kw in text for kw in LOKER_KEYWORDS)
+            is_magang = account in [acc.lower() for acc in ACCOUNTS_MAGANG] or any(kw in text for kw in MAGANG_KEYWORDS)
 
             sent = False
             if is_loker:
