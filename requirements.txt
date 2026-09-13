@@ -1,2 +1,2 @@
-apify-client==1.6.1
+apify-client==1.6.4
 requests==2.31.0
