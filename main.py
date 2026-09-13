@@ -1,383 +1,110 @@
-"""
-Bot Otomatisasi Pencari Info Loker & Magang dari X (Twitter)
-=============================================================
-Sumber data : RSS Xcancel (https://xcancel.com/{akun}/rss)
-Tujuan      : Discord Webhook (2 channel terpisah: Loker & Magang)
-Hosting     : GitHub Actions (cron 30 menit + workflow_dispatch)
-
-Author  : Senior Python Developer & Automation Expert (generated)
-"""
-
-import os
-import re
 import json
-import time
-import logging
-import calendar
-from datetime import datetime, timezone
-
+import os
 import requests
-import feedparser
+from apify_client import ApifyClient
 
-# ============================================================
-# 1. KONFIGURASI
-# ============================================================
+# ==========================================
+# KONFIGURASI APIFY & DISCORD
+# ==========================================
+APIFY_API_TOKEN = os.getenv("APIFY_API_TOKEN", "").strip()
 
-# Beberapa instance Nitter/Xcancel yang dicoba SECARA BERURUTAN (fallback).
-# Sejak kasus cease-and-desist X Corp -> Nitter (24 Agt 2026), ketersediaan
-# fitur RSS di instance publik SANGAT tidak stabil (bisa online tapi RSS-nya
-# mati, atau 400 Bad Request). Cek status terkini sebelum mengandalkan salah
-# satu domain di bawah ini: https://status.d420.de
-# Bot akan otomatis lanjut ke domain berikutnya jika satu instance gagal.
-RSS_INSTANCE_DOMAINS = [
-    "xcancel.com",
-    "nitter.net",
-    "nitter.poast.org",
-]
-RSS_URL_TEMPLATE = "https://{domain}/{account}/rss"
-
-MAX_ENTRIES_PER_ACCOUNT = 5
-POSTED_LOG_FILE = "posted_tweets.json"
-MAX_LOG_HISTORY = 500
-
-REQUEST_TIMEOUT = 15  # detik
-FETCH_RETRIES = 2
-REQUEST_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept": "application/rss+xml, application/xml, text/xml, */*",
-}
-
-# --- Akun target per kategori ---
-ACCOUNTS_LOKER = [
-    "lokerdotid", "lokerjogjax", "jogjalowker", "disiniloker",
-    "magnecareer", "twitlowongan", "sobatmagang_id",
-]
-ACCOUNTS_MAGANG = ["sobatmagang_id", "disiniloker", "magnecareer"]
-
-# Gabungan unik semua akun yang perlu di-fetch (agar tidak fetch dobel
-# untuk akun yang muncul di kedua daftar, mis. disiniloker & magnecareer)
-ALL_ACCOUNTS = sorted(set(ACCOUNTS_LOKER + ACCOUNTS_MAGANG))
-
-# --- Keyword per kategori (dicocokkan case-insensitive) ---
-LOKER_KEYWORDS = [
-    "#infoloker", "#loker", "info loker", "#lowker",
-    "#lowongan", "loker jogja", "#lokerpam", "#lowongan",
-]
-MAGANG_KEYWORDS = [
-    "#infomagang", "#magangid", "#magangyuk", "#magang", "#magangpam",
-]
-
-# --- Discord Webhook & Role (diambil dari GitHub Secrets / env var) ---
 DISCORD_WEBHOOK_LOKER = os.getenv("DISCORD_WEBHOOK_LOKER", "").strip()
 DISCORD_WEBHOOK_MAGANG = os.getenv("DISCORD_WEBHOOK_MAGANG", "").strip()
 ROLE_ID_LOKER = os.getenv("ROLE_ID_LOKER", "").strip()
 ROLE_ID_MAGANG = os.getenv("ROLE_ID_MAGANG", "").strip()
 
-EMBED_COLOR_LOKER = 0x2ECC71   # hijau
-EMBED_COLOR_MAGANG = 0x3498DB  # biru
+ACCOUNTS_LOKER = ["lokerdotid", "lokerjogjax", "jogjalowker", "disiniloker", "magnecareer", "twitlowongan", "sobatmagang_id"]
+ACCOUNTS_MAGANG = ["sobatmagang_id", "disiniloker", "magnecareer"]
 
-# ============================================================
-# 2. LOGGING
-# ============================================================
+LOKER_KEYWORDS = [kw.lower() for kw in ["#InfoLoker", "#Loker", "INFO LOKER", "#lowker", "#lowongan", "Loker Jogja", "#LokerPam", "#Lowongan"]]
+MAGANG_KEYWORDS = [kw.lower() for kw in ["#infoMagang", "#magangID", "#magangYuk", "#magang", "#MagangPam"]]
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S",
-)
-logger = logging.getLogger("loker-magang-bot")
+LOG_FILE = "posted_tweets.json"
 
-STATUS_ID_PATTERN = re.compile(r"/status/(\d+)")
-
-
-# ============================================================
-# 3. PENYIMPANAN LOG (ANTI-DUPLIKASI)
-# ============================================================
-
-def load_posted_ids():
-    """Baca daftar ID tweet yang sudah pernah dikirim."""
-    if not os.path.exists(POSTED_LOG_FILE):
-        logger.info(f"{POSTED_LOG_FILE} belum ada, memulai dari daftar kosong.")
+def load_posted_tweets():
+    if not os.path.exists(LOG_FILE):
         return []
-    try:
-        with open(POSTED_LOG_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, list):
-            return data
-        logger.warning("Isi posted_tweets.json bukan list, reset ke kosong.")
-        return []
-    except (json.JSONDecodeError, OSError) as e:
-        logger.error(f"Gagal membaca {POSTED_LOG_FILE}: {e}. Reset ke daftar kosong.")
-        return []
-
-
-def save_posted_ids(posted_ids):
-    """Simpan daftar ID, dibatasi maksimal MAX_LOG_HISTORY entri terakhir."""
-    trimmed = posted_ids[-MAX_LOG_HISTORY:]
-    try:
-        with open(POSTED_LOG_FILE, "w", encoding="utf-8") as f:
-            json.dump(trimmed, f, indent=2, ensure_ascii=False)
-        logger.info(f"Berhasil menyimpan {len(trimmed)} ID ke {POSTED_LOG_FILE}.")
-    except OSError as e:
-        logger.error(f"Gagal menulis {POSTED_LOG_FILE}: {e}")
-
-
-# ============================================================
-# 4. EKSTRAKSI & PARSING
-# ============================================================
-
-def extract_tweet_id(link):
-    """
-    Ambil ID tweet secara presisi dari URL status.
-    Mengabaikan tautan non-status atau yang mengandung kata 'rss'.
-    """
-    if not link:
-        return None
-    if "rss" in link.lower():
-        return None
-    match = STATUS_ID_PATTERN.search(link)
-    return match.group(1) if match else None
-
-
-def clean_text(raw_html):
-    """Bersihkan tag HTML dasar yang biasa muncul di isi RSS Xcancel."""
-    if not raw_html:
-        return ""
-    text = re.sub(r"<br\s*/?>", "\n", raw_html)
-    text = re.sub(r"<.*?>", "", text)
-    text = (
-        text.replace("&amp;", "&")
-        .replace("&quot;", '"')
-        .replace("&#39;", "'")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-    )
-    return text.strip()
-
-
-def get_iso_timestamp(entry):
-    """Konversi waktu publish RSS (RFC822) ke format ISO8601 untuk Discord embed."""
-    parsed = entry.get("published_parsed") or entry.get("updated_parsed")
-    if parsed:
+    with open(LOG_FILE, "r") as f:
         try:
-            dt = datetime.fromtimestamp(calendar.timegm(parsed), tz=timezone.utc)
-            return dt.isoformat()
-        except (OverflowError, ValueError, TypeError):
-            pass
-    return datetime.now(timezone.utc).isoformat()
+            return json.load(f)
+        except json.JSONDecodeError:
+            return []
 
+def save_posted_tweet(tweet_id, posted_list):
+    if tweet_id not in posted_list:
+        posted_list.append(tweet_id)
+        if len(posted_list) > 500:
+            posted_list = posted_list[-500:]
+        with open(LOG_FILE, "w") as f:
+            json.dump(posted_list, f)
 
-def match_keywords(text, keywords):
-    text_lower = text.lower()
-    return any(kw.lower() in text_lower for kw in keywords)
-
-
-def determine_categories(account, combined_text):
-    """
-    Tentukan kategori (loker/magang) berdasarkan asal akun ATAU kecocokan
-    keyword. Satu postingan bisa masuk ke dua kategori sekaligus.
-    """
-    categories = set()
-    if account in ACCOUNTS_LOKER or match_keywords(combined_text, LOKER_KEYWORDS):
-        categories.add("loker")
-    if account in ACCOUNTS_MAGANG or match_keywords(combined_text, MAGANG_KEYWORDS):
-        categories.add("magang")
-    return categories
-
-
-# ============================================================
-# 5. PENGAMBILAN RSS FEED
-# ============================================================
-
-def fetch_feed(account):
-    """
-    Ambil & parse RSS feed sebuah akun.
-    Mencoba tiap domain di RSS_INSTANCE_DOMAINS secara berurutan (fallback);
-    kalau satu instance mengembalikan 400 (fitur RSS mati/diblokir), langsung
-    pindah ke domain berikutnya tanpa buang waktu retry di instance yang sama.
-    """
-    last_error = None
-
-    for domain in RSS_INSTANCE_DOMAINS:
-        url = RSS_URL_TEMPLATE.format(domain=domain, account=account)
-
-        for attempt in range(1, FETCH_RETRIES + 2):
-            try:
-                resp = requests.get(url, headers=REQUEST_HEADERS, timeout=REQUEST_TIMEOUT)
-
-                if resp.status_code == 400:
-                    last_error = f"400 Bad Request dari {domain} (kemungkinan RSS dinonaktifkan di instance ini)"
-                    logger.warning(f"[{account}] {last_error}, mencoba instance lain...")
-                    break  # jangan retry di instance yang sudah pasti menolak, langsung ganti domain
-
-                resp.raise_for_status()
-                feed = feedparser.parse(resp.content)
-                if feed.entries or not feed.bozo:
-                    if domain != RSS_INSTANCE_DOMAINS[0]:
-                        logger.info(f"[{account}] Berhasil menggunakan instance fallback: {domain}")
-                    return feed
-                last_error = getattr(feed, "bozo_exception", "unknown parse error")
-            except requests.RequestException as e:
-                last_error = e
-
-            if attempt <= FETCH_RETRIES:
-                logger.warning(f"[{account}] [{domain}] Percobaan {attempt} gagal ({last_error}), mencoba lagi...")
-                time.sleep(2)
-
-    logger.error(
-        f"[{account}] Semua instance RSS gagal dicoba ({', '.join(RSS_INSTANCE_DOMAINS)}). "
-        f"Error terakhir: {last_error}"
-    )
-    return None
-
-
-# ============================================================
-# 6. INTEGRASI DISCORD
-# ============================================================
-
-def build_embed(account, title, description, link, timestamp_iso, color):
-    display_title = (title or "").strip() or f"Postingan baru dari @{account}"
-    display_desc = (description or "").strip() or "(tidak ada teks tambahan)"
-
-    return {
-        "title": display_title[:256],
+def send_to_discord(webhook_url, text, link, category, role_id):
+    role_mention = f"<@&{role_id}>"
+    embed = {
+        "title": f"📢 Lowongan Kategori: {category.upper()}",
+        "description": text[:4000],
         "url": link,
-        "description": display_desc[:4096],
-        "color": color,
-        "author": {
-            "name": f"@{account}",
-            "url": f"https://xcancel.com/{account}",
-        },
-        "timestamp": timestamp_iso,
-        "footer": {"text": "Sumber: Xcancel RSS Feed"},
+        "color": 3447003 if category == "loker" else 15158332
     }
-
-
-def send_to_discord(webhook_url, role_id, embed):
-    """Kirim satu embed ke webhook Discord tertentu, dengan mention role jika ada."""
-    if not webhook_url:
-        logger.warning("Webhook URL kosong/tidak diset, pengiriman dilewati.")
-        return False
-
-    content = f"<@&{role_id}>" if role_id else ""
-    allowed_roles = [role_id] if role_id else []
-
     payload = {
-        "content": content,
-        "embeds": [embed],
-        "allowed_mentions": {"parse": [], "roles": allowed_roles},
+        "content": f"Info baru buat teman-teman! {role_mention}",
+        "embeds": [embed]
     }
-
-    try:
-        resp = requests.post(webhook_url, json=payload, timeout=REQUEST_TIMEOUT)
-
-        if resp.status_code == 429:
-            retry_after = 1.0
-            try:
-                retry_after = float(resp.json().get("retry_after", 1.0))
-            except (ValueError, json.JSONDecodeError):
-                pass
-            logger.warning(f"Terkena rate limit Discord, menunggu {retry_after:.1f}s...")
-            time.sleep(retry_after + 0.5)
-            resp = requests.post(webhook_url, json=payload, timeout=REQUEST_TIMEOUT)
-
-        resp.raise_for_status()
-        return True
-    except requests.RequestException as e:
-        logger.error(f"Gagal mengirim ke Discord: {e}")
-        return False
-
-
-# ============================================================
-# 7. PROSES UTAMA PER AKUN
-# ============================================================
-
-def process_account(account, posted_ids, new_posted_ids, stats):
-    feed = fetch_feed(account)
-    if feed is None:
-        return
-
-    entries = feed.entries[:MAX_ENTRIES_PER_ACCOUNT]
-
-    # Proses dari yang terlama ke terbaru agar urutan pesan di Discord rapi
-    for entry in reversed(entries):
-        link = entry.get("link", "")
-        tweet_id = extract_tweet_id(link)
-        if not tweet_id:
-            continue
-        if tweet_id in posted_ids or tweet_id in new_posted_ids:
-            continue  # sudah pernah dikirim sebelumnya
-
-        raw_desc = entry.get("summary", "") or entry.get("description", "")
-        text_content = clean_text(raw_desc)
-        title_raw = clean_text(entry.get("title", ""))
-        timestamp_iso = get_iso_timestamp(entry)
-
-        categories = determine_categories(account, f"{title_raw} {text_content}")
-        if not categories:
-            continue  # tidak cocok kategori manapun, abaikan
-
-        sent_any = False
-
-        if "loker" in categories:
-            embed = build_embed(account, title_raw, text_content, link, timestamp_iso, EMBED_COLOR_LOKER)
-            if send_to_discord(DISCORD_WEBHOOK_LOKER, ROLE_ID_LOKER, embed):
-                logger.info(f"[{account}] -> Terkirim ke channel LOKER (ID {tweet_id})")
-                sent_any = True
-                stats["loker"] += 1
-
-        if "magang" in categories:
-            embed = build_embed(account, title_raw, text_content, link, timestamp_iso, EMBED_COLOR_MAGANG)
-            if send_to_discord(DISCORD_WEBHOOK_MAGANG, ROLE_ID_MAGANG, embed):
-                logger.info(f"[{account}] -> Terkirim ke channel MAGANG (ID {tweet_id})")
-                sent_any = True
-                stats["magang"] += 1
-
-        if sent_any:
-            new_posted_ids.append(tweet_id)
-            time.sleep(1)  # jaga jarak antar request ke Discord agar tidak rate-limit
-
-
-# ============================================================
-# 8. ENTRY POINT
-# ============================================================
+    response = requests.post(webhook_url, json=payload)
+    if response.status_code in [200, 204]:
+        print(f"✅ Berhasil mengirim postingan ke channel {category}")
+    else:
+        print(f"❌ Gagal mengirim ke Discord ({category}). Status: {response.status_code}, Respon: {response.text}")
 
 def main():
-    logger.info("=== Mulai proses pencarian Loker & Magang ===")
+    client = ApifyClient(APIFY_API_TOKEN)
+    posted_tweets = load_posted_tweets()
+    
+    all_accounts = list(set(ACCOUNTS_LOKER + ACCOUNTS_MAGANG))
+    print(f"🔍 Menjalankan Apify Scraper untuk {len(all_accounts)} akun...")
 
-    if not DISCORD_WEBHOOK_LOKER and not DISCORD_WEBHOOK_MAGANG:
-        logger.warning(
-            "Kedua DISCORD_WEBHOOK_LOKER dan DISCORD_WEBHOOK_MAGANG kosong. "
-            "Bot tetap berjalan (untuk cek parsing) tapi tidak akan mengirim apapun."
-        )
+    # Konfigurasi input untuk Actor Apify (Menggunakan apidojo/tweet-scraper)
+    run_input = {
+        "twitterHandles": all_accounts,
+        "maxItems": 40,  # Dibatasi 40 item total agar hemat kuota/kredit $5
+        "sort": "Latest"
+    }
 
-    posted_ids = load_posted_ids()
-    new_posted_ids = []
-    stats = {"loker": 0, "magang": 0}
+    try:
+        run = client.actor("apidojo/tweet-scraper").call(run_input=run_input)
+        dataset_id = run["defaultDatasetId"]
+        items = client.dataset(dataset_id).iterate_items()
+    except Exception as e:
+        print(f"⚠️ Gagal menjalankan Apify actor: {e}")
+        return
 
-    for account in ALL_ACCOUNTS:
-        logger.info(f"Memeriksa akun: @{account}")
-        try:
-            process_account(account, posted_ids, new_posted_ids, stats)
-        except Exception as e:  # noqa: BLE001 - jangan sampai 1 akun error menghentikan semua
-            logger.error(f"[{account}] Error tak terduga: {e}")
-        time.sleep(1.5)  # jeda sopan antar request ke Xcancel
+    for item in items:
+        tweet_id = str(item.get("id", ""))
+        if not tweet_id or tweet_id in posted_tweets:
+            continue
 
-    if new_posted_ids:
-        updated = posted_ids + new_posted_ids
-        save_posted_ids(updated)
-        logger.info(
-            f"Selesai. Postingan baru terkirim -> Loker: {stats['loker']}, "
-            f"Magang: {stats['magang']} (total unik: {len(new_posted_ids)})"
-        )
-    else:
-        logger.info("Tidak ada postingan baru yang cocok kategori pada siklus ini.")
+        text = (item.get("text") or item.get("full_text", "")).lower()
+        original_text = item.get("text") or item.get("full_text", "")
+        
+        author_username = item.get("author", {}).get("userName", "").lower()
+        tweet_url = item.get("url", f"https://twitter.com/{author_username}/status/{tweet_id}")
 
-    logger.info("=== Selesai ===")
+        is_loker = author_username in ACCOUNTS_LOKER or any(kw in text for kw in LOKER_KEYWORDS)
+        is_magang = author_username in ACCOUNTS_MAGANG or any(kw in text for kw in MAGANG_KEYWORDS)
 
+        sent = False
+        if is_loker:
+            send_to_discord(DISCORD_WEBHOOK_LOKER, original_text, tweet_url, "loker", ROLE_ID_LOKER)
+            sent = True
+
+        if is_magang:
+            send_to_discord(DISCORD_WEBHOOK_MAGANG, original_text, tweet_url, "magang", ROLE_ID_MAGANG)
+            sent = True
+
+        if sent:
+            save_posted_tweet(tweet_id, posted_tweets)
+
+    print("🎉 Selesai memproses dataset Apify.")
 
 if __name__ == "__main__":
     main()
