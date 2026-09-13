@@ -23,7 +23,19 @@ import feedparser
 # 1. KONFIGURASI
 # ============================================================
 
-XCANCEL_BASE_URL = "https://rss.xcancel.com/{}/rss"
+# Beberapa instance Nitter/Xcancel yang dicoba SECARA BERURUTAN (fallback).
+# Sejak kasus cease-and-desist X Corp -> Nitter (24 Agt 2026), ketersediaan
+# fitur RSS di instance publik SANGAT tidak stabil (bisa online tapi RSS-nya
+# mati, atau 400 Bad Request). Cek status terkini sebelum mengandalkan salah
+# satu domain di bawah ini: https://status.d420.de
+# Bot akan otomatis lanjut ke domain berikutnya jika satu instance gagal.
+RSS_INSTANCE_DOMAINS = [
+    "xcancel.com",
+    "nitter.net",
+    "nitter.poast.org",
+]
+RSS_URL_TEMPLATE = "https://{domain}/{account}/rss"
+
 MAX_ENTRIES_PER_ACCOUNT = 5
 POSTED_LOG_FILE = "posted_tweets.json"
 MAX_LOG_HISTORY = 500
@@ -181,26 +193,44 @@ def determine_categories(account, combined_text):
 # ============================================================
 
 def fetch_feed(account):
-    """Ambil & parse RSS feed sebuah akun, dengan retry sederhana."""
-    url = XCANCEL_BASE_URL.format(account)
+    """
+    Ambil & parse RSS feed sebuah akun.
+    Mencoba tiap domain di RSS_INSTANCE_DOMAINS secara berurutan (fallback);
+    kalau satu instance mengembalikan 400 (fitur RSS mati/diblokir), langsung
+    pindah ke domain berikutnya tanpa buang waktu retry di instance yang sama.
+    """
     last_error = None
 
-    for attempt in range(1, FETCH_RETRIES + 2):
-        try:
-            resp = requests.get(url, headers=REQUEST_HEADERS, timeout=REQUEST_TIMEOUT)
-            resp.raise_for_status()
-            feed = feedparser.parse(resp.content)
-            if feed.entries or not feed.bozo:
-                return feed
-            last_error = getattr(feed, "bozo_exception", "unknown parse error")
-        except requests.RequestException as e:
-            last_error = e
+    for domain in RSS_INSTANCE_DOMAINS:
+        url = RSS_URL_TEMPLATE.format(domain=domain, account=account)
 
-        if attempt <= FETCH_RETRIES:
-            logger.warning(f"[{account}] Percobaan {attempt} gagal ({last_error}), mencoba lagi...")
-            time.sleep(2)
+        for attempt in range(1, FETCH_RETRIES + 2):
+            try:
+                resp = requests.get(url, headers=REQUEST_HEADERS, timeout=REQUEST_TIMEOUT)
 
-    logger.error(f"[{account}] Gagal mengambil RSS setelah beberapa percobaan: {last_error}")
+                if resp.status_code == 400:
+                    last_error = f"400 Bad Request dari {domain} (kemungkinan RSS dinonaktifkan di instance ini)"
+                    logger.warning(f"[{account}] {last_error}, mencoba instance lain...")
+                    break  # jangan retry di instance yang sudah pasti menolak, langsung ganti domain
+
+                resp.raise_for_status()
+                feed = feedparser.parse(resp.content)
+                if feed.entries or not feed.bozo:
+                    if domain != RSS_INSTANCE_DOMAINS[0]:
+                        logger.info(f"[{account}] Berhasil menggunakan instance fallback: {domain}")
+                    return feed
+                last_error = getattr(feed, "bozo_exception", "unknown parse error")
+            except requests.RequestException as e:
+                last_error = e
+
+            if attempt <= FETCH_RETRIES:
+                logger.warning(f"[{account}] [{domain}] Percobaan {attempt} gagal ({last_error}), mencoba lagi...")
+                time.sleep(2)
+
+    logger.error(
+        f"[{account}] Semua instance RSS gagal dicoba ({', '.join(RSS_INSTANCE_DOMAINS)}). "
+        f"Error terakhir: {last_error}"
+    )
     return None
 
 
