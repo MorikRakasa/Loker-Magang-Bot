@@ -23,7 +23,7 @@ import feedparser
 # 1. KONFIGURASI
 # ============================================================
 
-XCANCEL_BASE_URL = "https://xcancel.com/{}/rss"
+XCANCEL_BASE_URL = "https://rss.xcancel.com/{}/rss"
 MAX_ENTRIES_PER_ACCOUNT = 5
 POSTED_LOG_FILE = "posted_tweets.json"
 MAX_LOG_HISTORY = 500
