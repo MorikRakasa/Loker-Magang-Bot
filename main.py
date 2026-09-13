@@ -33,7 +33,6 @@ COLOR_MAGANG = 5763719  # Hijau
 # 3. FUNGSI PENDUKUNG
 # ==========================================
 def load_posted_ids():
-    """Membaca data tweet yang sudah diposting dari JSON lokal."""
     if os.path.exists(LOG_FILE):
         try:
             with open(LOG_FILE, "r") as file:
@@ -43,18 +42,14 @@ def load_posted_ids():
     return []
 
 def save_posted_ids(posted_ids):
-    """Menyimpan ID tweet terbaru, membatasi ukuran maksimal."""
     with open(LOG_FILE, "w") as file:
         json.dump(posted_ids[-MAX_LOG_SIZE:], file, indent=4)
 
 def send_to_discord(webhook_url, role_id, title, description, url, color, author_name):
-    """Mengirim data ke Discord menggunakan Webhook."""
     if not webhook_url:
         return False
         
     content = f"<@&{role_id}>" if role_id else ""
-    
-    # Potong deskripsi jika terlalu panjang (Batas Embed Discord 4096 karakter)
     description = description[:4090] + "..." if len(description) > 4090 else description
 
     payload = {
@@ -80,7 +75,6 @@ def send_to_discord(webhook_url, role_id, title, description, url, color, author
         return False
 
 def check_category(text, username):
-    """Mengecek kategori Loker dan/atau Magang (Case-Insensitive)."""
     text_lower = text.lower()
     user_lower = username.lower()
     
@@ -101,12 +95,14 @@ def main():
     posted_ids = load_posted_ids()
     newly_posted = 0
 
-    # Menggunakan Actor "apidojo/tweet-scraper" (Sangat stabil untuk Twitter)
     all_accounts = list(set(ACCOUNTS_LOKER + ACCOUNTS_MAGANG))
     
+    # Menggunakan searchTerms dengan format from:username agar terhindar dari noResults: true
+    search_queries = [f"from:{account}" for account in all_accounts]
+
     run_input = {
-        "twitterHandles": all_accounts,
-        "maxItems": len(all_accounts) * 10, # Ambil ekstra untuk memastikan kita dapat 5 terbaru
+        "searchTerms": search_queries,
+        "maxItems": len(all_accounts) * 10,
         "sort": "Latest"
     }
 
@@ -115,42 +111,43 @@ def main():
     
     dataset_items = client.dataset(run["defaultDatasetId"]).iterate_items()
 
-    # Mengelompokkan dan membatasi postingan (Maksimal 5 per akun)
     tweets_by_account = {}
     for item in dataset_items:
-        # Menangani format JSON Apify (apidojo)
+        # Lewati log error kosong dari Apify
+        if item.get("noResults"):
+            continue
+            
         tweet_id = item.get("id")
         text = item.get("text", "")
         author_info = item.get("author", {})
-        username = author_info.get("userName", "")
+        username = author_info.get("userName", "") or item.get("username", "")
         
         if not tweet_id or not username:
             continue
             
-        if username not in tweets_by_account:
-            tweets_by_account[username] = []
+        username_lower = username.lower()
+        if username_lower not in tweets_by_account:
+            tweets_by_account[username_lower] = []
             
-        if len(tweets_by_account[username]) < MAX_POSTS_PER_ACCOUNT:
-            tweets_by_account[username].append(item)
+        if len(tweets_by_account[username_lower]) < MAX_POSTS_PER_ACCOUNT:
+            tweets_by_account[username_lower].append(item)
 
-    # Proses pengiriman ke Discord
-    for username, tweets in tweets_by_account.items():
+    for username_lower, tweets in tweets_by_account.items():
         for t in tweets:
             tweet_id = t.get("id")
             
-            # 1. Cek Duplikasi
             if tweet_id in posted_ids:
                 continue
 
             text = t.get("text", "")
+            author_info = t.get("author", {})
+            username = author_info.get("userName", username_lower)
             url = t.get("url", f"https://twitter.com/{username}/status/{tweet_id}")
-            author_name = t.get("author", {}).get("name", username)
+            author_name = author_info.get("name", username)
 
-            # 2. Cek Kategori / Routing
             is_loker, is_magang = check_category(text, username)
             sent = False
 
-            # 3. Kirim ke Channel Loker
             if is_loker and WEBHOOK_LOKER:
                 success = send_to_discord(
                     WEBHOOK_LOKER, ROLE_ID_LOKER, 
@@ -159,7 +156,6 @@ def main():
                 )
                 if success: sent = True
 
-            # 4. Kirim ke Channel Magang
             if is_magang and WEBHOOK_MAGANG:
                 success = send_to_discord(
                     WEBHOOK_MAGANG, ROLE_ID_MAGANG, 
@@ -168,13 +164,11 @@ def main():
                 )
                 if success: sent = True
 
-            # 5. Catat Log jika berhasil terkirim ke salah satu/kedua channel
             if sent:
                 posted_ids.append(tweet_id)
                 newly_posted += 1
                 print(f"Berhasil mengirim tweet {tweet_id} dari @{username}")
 
-    # Simpan kembali ID tweet untuk run berikutnya
     save_posted_ids(posted_ids)
     print(f"Proses selesai. {newly_posted} postingan baru terkirim ke Discord.")
 
