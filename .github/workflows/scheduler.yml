@@ -2,7 +2,7 @@ name: Apify Discord Bot 247
 
 on:
   schedule:
-    # Berjalan otomatis setiap 3 jam sekali (Hemat kuota tier gratis $5)
+    # Berjalan setiap 3 jam sekali agar aman di bawah limit gratis $5/bulan
     - cron: '0 */3 * * *'
   workflow_dispatch:
 
