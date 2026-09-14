@@ -106,7 +106,6 @@ def main():
         "onlyTwitterBlue": False,
         "onlyVerifiedUsers": False,
         "onlyVideo": False,
-        "searchTerms": False,
         "sort": "Latest",
         "start": "2026-09-29",
         "tweetLanguage": "en",
