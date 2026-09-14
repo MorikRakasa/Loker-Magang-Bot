@@ -95,25 +95,58 @@ def main():
     posted_ids = load_posted_ids()
     newly_posted = 0
 
-    all_accounts = list(set(ACCOUNTS_LOKER + ACCOUNTS_MAGANG))
-    
-    # Menggunakan searchTerms dengan format from:username agar terhindar dari noResults: true
-    search_queries = [f"from:{account}" for account in all_accounts]
-
+    # Konfigurasi input Apify sesuai parameter kustom yang disediakan
     run_input = {
-        "searchTerms": search_queries,
-        "maxItems": len(all_accounts) * 10,
-        "sort": "Latest"
+        "customMapFunction": "(object) => { return {...object} }",
+        "end": "2026-09-30",
+        "includeSearchTerms": False,
+        "maxItems": 1000,
+        "onlyImage": False,
+        "onlyQuote": False,
+        "onlyTwitterBlue": False,
+        "onlyVerifiedUsers": False,
+        "onlyVideo": False,
+        "searchTerms": [
+            "#InfoLoker",
+            "#Loker",
+            "#INFO LOKER",
+            "#lowker ",
+            "#lowongan",
+            "#Loker Jogja",
+            "#LokerPam",
+            "#Lowongan",
+            "#infocariloker",
+            "#infoloker ",
+            "#lowongankerja",
+            "#disiniloker",
+            "#infoMagang",
+            "#magangID",
+            "#magangYuk ",
+            "#magang",
+            "#MagangPam"
+        ],
+        "sort": "Latest",
+        "start": "2026-09-29",
+        "tweetLanguage": "en",
+        "twitterHandles": [
+            "lokerdotid",
+            "lokerjogjax",
+            "jogjalowker",
+            "disiniloker",
+            "magnecareer",
+            "twitlowongan",
+            "sobatmagang_id",
+            "glintsid"
+        ]
     }
 
-    print(f"Menjalankan Apify Scraper untuk {len(all_accounts)} akun...")
+    print("Menjalankan Apify Tweet Scraper dengan parameter kustom...")
     run = client.actor("apidojo/tweet-scraper").call(run_input=run_input)
     
     dataset_items = client.dataset(run["defaultDatasetId"]).iterate_items()
 
     tweets_by_account = {}
     for item in dataset_items:
-        # Lewati log error kosong dari Apify
         if item.get("noResults"):
             continue
             
