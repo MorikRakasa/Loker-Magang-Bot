@@ -4,7 +4,7 @@ import json
 import os
 
 # ==========================================
-# 1. KONFIGURASI DISCORD & ROLE MENTION (VIA ENVIRONMENT VARIABLES)
+# 1. KONFIGURASI DISCORD & ROLE MENTION
 # ==========================================
 DISCORD_WEBHOOK_LOKER = os.getenv("DISCORD_WEBHOOK_LOKER")
 DISCORD_WEBHOOK_MAGANG = os.getenv("DISCORD_WEBHOOK_MAGANG")
@@ -24,10 +24,20 @@ MAGANG_KEYWORDS = [kw.lower() for kw in ["#infoMagang", "#magangID", "#magangYuk
 LOG_FILE = "posted_tweets.json"
 
 # ==========================================
-# 3. PENCEGAHAN DUPLIKASI (LOG DATABASE)
+# 3. DAFTAR ALTERNATIF SUMBER (FAILOVER)
+# Urutan prioritas: twstalker -> sotwe -> xcancel -> nitter
+# ==========================================
+SOURCE_TEMPLATES = [
+    "https://twstalker.com/{account}/rss",
+    "https://sotwe.com/{account}/rss",
+    "https://xcancel.com/{account}/rss",
+    "https://nitter.net/{account}/rss"
+]
+
+# ==========================================
+# 4. PENCEGAHAN DUPLIKASI (LOG DATABASE)
 # ==========================================
 def load_posted_tweets():
-    """Membaca daftar ID tweet yang sudah pernah dikirim."""
     if not os.path.exists(LOG_FILE):
         return []
     with open(LOG_FILE, "r") as f:
@@ -37,19 +47,17 @@ def load_posted_tweets():
             return []
 
 def save_posted_tweet(tweet_id, posted_list):
-    """Menyimpan ID tweet baru ke file JSON log."""
     if tweet_id not in posted_list:
         posted_list.append(tweet_id)
         with open(LOG_FILE, "w") as f:
             json.dump(posted_list, f)
 
 # ==========================================
-# 4. INTEGRASI DISCORD WEBHOOK + MENTION ROLE
+# 5. INTEGRASI DISCORD WEBHOOK + MENTION ROLE
 # ==========================================
 def send_to_discord(webhook_url, text, link, category, role_id):
-    """Mengirim pesan embed ke channel Discord disertai mention role."""
     if not webhook_url:
-        print(f"⚠️ Webhook URL untuk kategori {category} belum diatur di Environment Variables.")
+        print(f"⚠️ Webhook URL untuk kategori {category} belum diatur.")
         return
 
     role_mention = f"<@&{role_id}>" if role_id else ""
@@ -58,7 +66,7 @@ def send_to_discord(webhook_url, text, link, category, role_id):
         "title": f"📢 Lowongan Kategori: {category.upper()}",
         "description": text,
         "url": link,
-        "color": 3447003 if category == "loker" else 15158332  # Biru (Loker), Merah (Magang)
+        "color": 3447003 if category == "loker" else 15158332
     }
     
     payload = {
@@ -73,31 +81,51 @@ def send_to_discord(webhook_url, text, link, category, role_id):
         print(f"❌ Gagal mengirim ke Discord ({category}). Status: {response.status_code}")
 
 # ==========================================
-# 5. FUNGSI UTAMA (SCRAPING & ROUTING)
+# 6. FUNGSI UTAMA (SCRAPING DENGAN FAILOVER)
 # ==========================================
 def main():
     posted_tweets = load_posted_tweets()
     all_accounts = list(set(ACCOUNTS_LOKER + ACCOUNTS_MAGANG))
     
     for account in all_accounts:
-        # Menggunakan Xcancel RSS Feed sebagai sumber alternatif
-        rss_url = f"https://xcancel.com/{account}/rss"
-        feed = feedparser.parse(rss_url)
+        feed = None
+        used_source = ""
+        
+        # Coba ambil dari berbagai sumber secara berurutan jika server down
+        for template in SOURCE_TEMPLATES:
+            rss_url = template.format(account=account)
+            try:
+                parsed_feed = feedparser.parse(rss_url)
+                # Pastikan feed berhasil di-parse dan memiliki entries (tidak kosong/error)
+                if parsed_feed and getattr(parsed_feed, "entries", None):
+                    feed = parsed_feed
+                    used_source = rss_url
+                    break
+            except Exception:
+                continue
+                
+        if not feed or not feed.entries:
+            print(f"⚠️ Gagal mengambil data untuk akun @{account} dari semua alternatif sumber.")
+            continue
+            
+        print(f"📥 Berhasil mengambil data @{account} dari: {used_source}")
         
         for entry in feed.entries:
-            tweet_link = entry.link
-            
+            tweet_link = getattr(entry, "link", "")
+            if not tweet_link:
+                continue
+                
             try:
-                tweet_id = tweet_link.split('/')[-1].replace('#m', '')
+                # Normalisasi ID Tweet dari berbagai format URL alternatif
+                tweet_id = tweet_link.split('/')[-1].split('?')[0].replace('#m', '')
             except Exception:
                 continue
             
-            # Cek duplikasi di log lokal
             if not tweet_id or tweet_id in posted_tweets:
                 continue
                 
-            text = entry.title.lower()
-            original_text = entry.title
+            text = getattr(entry, "title", "").lower()
+            original_text = getattr(entry, "title", "")
             
             # Mekanisme Routing Kategori
             is_loker = account in ACCOUNTS_LOKER or any(kw in text for kw in LOKER_KEYWORDS)
@@ -113,7 +141,6 @@ def main():
                 send_to_discord(DISCORD_WEBHOOK_MAGANG, original_text, tweet_link, "magang", ROLE_ID_MAGANG)
                 sent = True
                 
-            # Catat ID jika berhasil terkirim ke channel terkait
             if sent:
                 save_posted_tweet(tweet_id, posted_tweets)
 
