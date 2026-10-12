@@ -1,29 +1,35 @@
-name: Xcancel Discord Bot 247
+name: Loker & Magang Discord Bot
 
 on:
   schedule:
+    # Jalan setiap 30 menit (bisa diubah menjadi '0 * * * *' untuk 60 menit)
     - cron: '*/30 * * * *'
-  workflow_dispatch:
+  workflow_dispatch:   # bisa dijalankan manual dari tab Actions
 
 permissions:
-  contents: write
+  contents: write      # perlu untuk auto-commit log posted_tweets.json
+
+# Hindari tumpang tindih antar-jadwal
+concurrency:
+  group: loker-magang-bot
+  cancel-in-progress: false
 
 jobs:
   run-bot:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v3
+        uses: actions/checkout@v4
 
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.11'
 
       - name: Install Dependencies
         run: pip install -r requirements.txt
 
-      - name: Run Scraper Script
+      - name: Run Scraper
         env:
           DISCORD_WEBHOOK_LOKER: ${{ secrets.DISCORD_WEBHOOK_LOKER }}
           DISCORD_WEBHOOK_MAGANG: ${{ secrets.DISCORD_WEBHOOK_MAGANG }}
