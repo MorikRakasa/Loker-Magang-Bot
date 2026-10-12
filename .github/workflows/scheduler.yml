@@ -2,11 +2,9 @@ name: Xcancel Discord Bot 247
 
 on:
   schedule:
-    # Mengatur eksekusi otomatis setiap 30 menit
     - cron: '*/30 * * * *'
-  workflow_dispatch: # Tombol jalankan manual via web GitHub
+  workflow_dispatch:
 
-# Memberikan izin agar script dapat memperbarui file log posted_tweets.json secara otomatis
 permissions:
   contents: write
 
@@ -26,6 +24,11 @@ jobs:
         run: pip install -r requirements.txt
 
       - name: Run Scraper Script
+        env:
+          DISCORD_WEBHOOK_LOKER: ${{ secrets.DISCORD_WEBHOOK_LOKER }}
+          DISCORD_WEBHOOK_MAGANG: ${{ secrets.DISCORD_WEBHOOK_MAGANG }}
+          ROLE_ID_LOKER: ${{ secrets.ROLE_ID_LOKER }}
+          ROLE_ID_MAGANG: ${{ secrets.ROLE_ID_MAGANG }}
         run: python main.py
 
       - name: Auto Commit Log Database
