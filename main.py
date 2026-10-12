@@ -1,190 +1,121 @@
-import os
-import json
+import feedparser
 import requests
-from apify_client import ApifyClient
+import json
+import os
 
 # ==========================================
-# 1. KONFIGURASI DAN KEYWORDS
+# 1. KONFIGURASI DISCORD & ROLE MENTION (VIA ENVIRONMENT VARIABLES)
+# ==========================================
+DISCORD_WEBHOOK_LOKER = os.getenv("DISCORD_WEBHOOK_LOKER")
+DISCORD_WEBHOOK_MAGANG = os.getenv("DISCORD_WEBHOOK_MAGANG")
+
+ROLE_ID_LOKER = os.getenv("ROLE_ID_LOKER", "")
+ROLE_ID_MAGANG = os.getenv("ROLE_ID_MAGANG", "")
+
+# ==========================================
+# 2. KONFIGURASI AKUN & KEYWORDS
 # ==========================================
 ACCOUNTS_LOKER = ["lokerdotid", "lokerjogjax", "jogjalowker", "disiniloker", "magnecareer", "twitlowongan", "sobatmagang_id"]
 ACCOUNTS_MAGANG = ["sobatmagang_id", "disiniloker", "magnecareer"]
 
-LOKER_KEYWORDS = ["#infoloker", "#loker", "info loker", "#lowker", "#lowongan", "loker jogja", "#lokerpam"]
-MAGANG_KEYWORDS = ["#infomagang", "#magangid", "#magangyuk", "#magang", "#magangpam"]
+LOKER_KEYWORDS = [kw.lower() for kw in ["#InfoLoker", "#Loker", "INFO LOKER", "#lowker", "#lowongan", "Loker Jogja", "#LokerPam", "#Lowongan"]]
+MAGANG_KEYWORDS = [kw.lower() for kw in ["#infoMagang", "#magangID", "#magangYuk", "#magang", "#MagangPam"]]
 
-MAX_POSTS_PER_ACCOUNT = 5
-MAX_LOG_SIZE = 500
 LOG_FILE = "posted_tweets.json"
 
 # ==========================================
-# 2. KONFIGURASI ENVIRONMENT VARIABLES
+# 3. PENCEGAHAN DUPLIKASI (LOG DATABASE)
 # ==========================================
-APIFY_API_TOKEN = os.getenv("APIFY_API_TOKEN")
-WEBHOOK_LOKER = os.getenv("DISCORD_WEBHOOK_LOKER")
-WEBHOOK_MAGANG = os.getenv("DISCORD_WEBHOOK_MAGANG")
-ROLE_ID_LOKER = os.getenv("ROLE_ID_LOKER", "")
-ROLE_ID_MAGANG = os.getenv("ROLE_ID_MAGANG", "")
-
-# Warna Embed Discord (Desimal)
-COLOR_LOKER = 3447003   # Biru
-COLOR_MAGANG = 5763719  # Hijau
-
-# ==========================================
-# 3. FUNGSI PENDUKUNG
-# ==========================================
-def load_posted_ids():
-    if os.path.exists(LOG_FILE):
+def load_posted_tweets():
+    """Membaca daftar ID tweet yang sudah pernah dikirim."""
+    if not os.path.exists(LOG_FILE):
+        return []
+    with open(LOG_FILE, "r") as f:
         try:
-            with open(LOG_FILE, "r") as file:
-                return json.load(file)
+            return json.load(f)
         except json.JSONDecodeError:
             return []
-    return []
 
-def save_posted_ids(posted_ids):
-    with open(LOG_FILE, "w") as file:
-        json.dump(posted_ids[-MAX_LOG_SIZE:], file, indent=4)
-
-def send_to_discord(webhook_url, role_id, title, description, url, color, author_name):
-    if not webhook_url:
-        return False
-        
-    content = f"<@&{role_id}>" if role_id else ""
-    description = description[:4090] + "..." if len(description) > 4090 else description
-
-    payload = {
-        "content": content,
-        "embeds": [
-            {
-                "title": title,
-                "description": description,
-                "url": url,
-                "color": color,
-                "author": {"name": author_name},
-                "footer": {"text": "Automated by GitHub Actions & Apify"}
-            }
-        ]
-    }
-    
-    try:
-        response = requests.post(webhook_url, json=payload)
-        response.raise_for_status()
-        return True
-    except requests.exceptions.RequestException as e:
-        print(f"Error mengirim ke Discord: {e}")
-        return False
-
-def check_category(text, username):
-    text_lower = text.lower()
-    user_lower = username.lower()
-    
-    is_loker = user_lower in [u.lower() for u in ACCOUNTS_LOKER] or any(k.lower() in text_lower for k in LOKER_KEYWORDS)
-    is_magang = user_lower in [u.lower() for u in ACCOUNTS_MAGANG] or any(k.lower() in text_lower for k in MAGANG_KEYWORDS)
-    
-    return is_loker, is_magang
+def save_posted_tweet(tweet_id, posted_list):
+    """Menyimpan ID tweet baru ke file JSON log."""
+    if tweet_id not in posted_list:
+        posted_list.append(tweet_id)
+        with open(LOG_FILE, "w") as f:
+            json.dump(posted_list, f)
 
 # ==========================================
-# 4. FUNGSI UTAMA
+# 4. INTEGRASI DISCORD WEBHOOK + MENTION ROLE
+# ==========================================
+def send_to_discord(webhook_url, text, link, category, role_id):
+    """Mengirim pesan embed ke channel Discord disertai mention role."""
+    if not webhook_url:
+        print(f"⚠️ Webhook URL untuk kategori {category} belum diatur di Environment Variables.")
+        return
+
+    role_mention = f"<@&{role_id}>" if role_id else ""
+    
+    embed = {
+        "title": f"📢 Lowongan Kategori: {category.upper()}",
+        "description": text,
+        "url": link,
+        "color": 3447003 if category == "loker" else 15158332  # Biru (Loker), Merah (Magang)
+    }
+    
+    payload = {
+        "content": f"Info baru buat teman-teman! {role_mention}".strip(),
+        "embeds": [embed]
+    }
+    
+    response = requests.post(webhook_url, json=payload)
+    if response.status_code in [200, 204]:
+        print(f"✅ Berhasil mengirim postingan ke channel {category}")
+    else:
+        print(f"❌ Gagal mengirim ke Discord ({category}). Status: {response.status_code}")
+
+# ==========================================
+# 5. FUNGSI UTAMA (SCRAPING & ROUTING)
 # ==========================================
 def main():
-    print("Memulai proses otomatisasi...")
-    if not APIFY_API_TOKEN:
-        raise ValueError("APIFY_API_TOKEN tidak ditemukan di Environment Variables!")
-
-    client = ApifyClient(APIFY_API_TOKEN)
-    posted_ids = load_posted_ids()
-    newly_posted = 0
-
-    # Konfigurasi input Apify sesuai parameter kustom yang disediakan
-    run_input = {
-        "customMapFunction": "(object) => { return {...object} }",
-        "end": "2026-09-30",
-        "includeSearchTerms": False,
-        "maxItems": 1000,
-        "onlyImage": False,
-        "onlyQuote": False,
-        "onlyTwitterBlue": False,
-        "onlyVerifiedUsers": False,
-        "onlyVideo": False,
-        "sort": "Latest",
-        "start": "2026-09-29",
-        "tweetLanguage": "en",
-        "twitterHandles": [
-            "lokerdotid",
-            "lokerjogjax",
-            "jogjalowker",
-            "disiniloker",
-            "magnecareer",
-            "twitlowongan",
-            "sobatmagang_id",
-            "glintsid"
-        ]
-    }
-
-    print("Menjalankan Apify Tweet Scraper dengan parameter kustom...")
-    run = client.actor("apidojo/tweet-scraper").call(run_input=run_input)
+    posted_tweets = load_posted_tweets()
+    all_accounts = list(set(ACCOUNTS_LOKER + ACCOUNTS_MAGANG))
     
-    dataset_items = client.dataset(run["defaultDatasetId"]).iterate_items()
-
-    tweets_by_account = {}
-    for item in dataset_items:
-        if item.get("noResults"):
-            continue
-            
-        tweet_id = item.get("id")
-        text = item.get("text", "")
-        author_info = item.get("author", {})
-        username = author_info.get("userName", "") or item.get("username", "")
+    for account in all_accounts:
+        # Menggunakan Xcancel RSS Feed sebagai sumber alternatif
+        rss_url = f"https://xcancel.com/{account}/rss"
+        feed = feedparser.parse(rss_url)
         
-        if not tweet_id or not username:
-            continue
+        for entry in feed.entries:
+            tweet_link = entry.link
             
-        username_lower = username.lower()
-        if username_lower not in tweets_by_account:
-            tweets_by_account[username_lower] = []
-            
-        if len(tweets_by_account[username_lower]) < MAX_POSTS_PER_ACCOUNT:
-            tweets_by_account[username_lower].append(item)
-
-    for username_lower, tweets in tweets_by_account.items():
-        for t in tweets:
-            tweet_id = t.get("id")
-            
-            if tweet_id in posted_ids:
+            try:
+                tweet_id = tweet_link.split('/')[-1].replace('#m', '')
+            except Exception:
                 continue
-
-            text = t.get("text", "")
-            author_info = t.get("author", {})
-            username = author_info.get("userName", username_lower)
-            url = t.get("url", f"https://twitter.com/{username}/status/{tweet_id}")
-            author_name = author_info.get("name", username)
-
-            is_loker, is_magang = check_category(text, username)
+            
+            # Cek duplikasi di log lokal
+            if not tweet_id or tweet_id in posted_tweets:
+                continue
+                
+            text = entry.title.lower()
+            original_text = entry.title
+            
+            # Mekanisme Routing Kategori
+            is_loker = account in ACCOUNTS_LOKER or any(kw in text for kw in LOKER_KEYWORDS)
+            is_magang = account in ACCOUNTS_MAGANG or any(kw in text for kw in MAGANG_KEYWORDS)
+            
             sent = False
-
-            if is_loker and WEBHOOK_LOKER:
-                success = send_to_discord(
-                    WEBHOOK_LOKER, ROLE_ID_LOKER, 
-                    f"💼 Lowongan Kerja Baru dari @{username}", 
-                    text, url, COLOR_LOKER, author_name
-                )
-                if success: sent = True
-
-            if is_magang and WEBHOOK_MAGANG:
-                success = send_to_discord(
-                    WEBHOOK_MAGANG, ROLE_ID_MAGANG, 
-                    f"🎓 Info Magang Baru dari @{username}", 
-                    text, url, COLOR_MAGANG, author_name
-                )
-                if success: sent = True
-
+            
+            if is_loker:
+                send_to_discord(DISCORD_WEBHOOK_LOKER, original_text, tweet_link, "loker", ROLE_ID_LOKER)
+                sent = True
+                
+            if is_magang:
+                send_to_discord(DISCORD_WEBHOOK_MAGANG, original_text, tweet_link, "magang", ROLE_ID_MAGANG)
+                sent = True
+                
+            # Catat ID jika berhasil terkirim ke channel terkait
             if sent:
-                posted_ids.append(tweet_id)
-                newly_posted += 1
-                print(f"Berhasil mengirim tweet {tweet_id} dari @{username}")
-
-    save_posted_ids(posted_ids)
-    print(f"Proses selesai. {newly_posted} postingan baru terkirim ke Discord.")
+                save_posted_tweet(tweet_id, posted_tweets)
 
 if __name__ == "__main__":
     main()
